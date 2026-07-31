@@ -7,6 +7,7 @@
 ## 1. Project Overview
 
 ### 1.1 Goal
+
 Build a system that lets users ask natural-language questions and get accurate answers drawn from two very different kinds of sources:
 
 1. **Unstructured documents** — PDFs, Word docs (policies, manuals, reports, etc.)
@@ -15,6 +16,7 @@ Build a system that lets users ask natural-language questions and get accurate a
 The system should be smart enough to know *which kind of source* a question needs, and route accordingly.
 
 ### 1.2 Why this is hard (and interesting)
+
 A normal RAG system just embeds documents and does similarity search. This project is harder because:
 
 - Structured data (sales figures, inventory counts) doesn't answer well from embeddings alone — "total sales last quarter" needs a real query, not vector similarity.
@@ -22,6 +24,7 @@ A normal RAG system just embeds documents and does similarity search. This proje
 - The system needs a **router** that decides which path a question needs: document search or a live database query.
 
 ### 1.3 Scope boundaries (what this project is NOT, for now)
+
 - Not a general "connect any database" product — starts with SQL Server only
 - Not using a local/self-hosted LLM yet — cloud LLM (OpenAI/Azure OpenAI) for now
 - Not handling write/update operations — read-only, question-answering only
@@ -82,6 +85,7 @@ A normal RAG system just embeds documents and does similarity search. This proje
 ## 3. Core Components Explained
 
 ### 3.1 Document Ingestion (`RagSystem.Ingestion.Docs`)
+
 Handles PDF and Word files.
 
 - **PDF parsing**: `PdfPig` (pure .NET, no native dependencies) — extracts text per page
@@ -92,24 +96,29 @@ Handles PDF and Word files.
 - **Storage**: embedded and stored in Qdrant's `docs` collection
 
 ### 3.2 Structured Data — NL2SQL Only (`RagSystem.Ingestion.Sql`)
+
 This is the sole path for structured business data. No row embedding, no separate semantic search over DB content — every question about Sales/Inventory/etc. is answered by generating and running a real SQL query.
 
 **a) Schema Catalog (supports NL2SQL routing)**
+
 - A small metadata store describing each table/column in plain language (name, type, short description, sample values)
 - This catalog is embedded into Qdrant (`schema_catalog` collection) — **this is metadata about the schema, not the actual data**
 - When a question comes in, vector search over the catalog finds the 3–5 most relevant tables — these get included in the NL2SQL prompt instead of dumping the entire schema (saves tokens, improves accuracy)
 
 **b) NL2SQL Generation**
+
 - User question → LLM generates a real SQL query (using schema context + few-shot examples) → query executes against the actual DB (read-only)
 - Handles both simple lookups ("show me Acme Corp's overdue invoices") and aggregations ("total sales last quarter by region") — since it's always a live query, there's no distinction needed between "semantic" and "analytic" structured questions anymore. NL2SQL handles both.
 - Results come back as rows, which the LLM then formats into a natural-language answer
 
 **c) Why no row embedding**
+
 - Simpler system: one path for structured data, not two
 - Always accurate: live query means no stale summaries to keep in sync
 - Avoids the "embeddings can't do math" failure mode entirely, since nothing structured is ever approximated via similarity search
 
 ### 3.3 Vector Store — Qdrant (`RagSystem.VectorStore`)
+
 - Self-hosted via Docker (see section 6)
 - Now holds only two collections:
   - `docs` — document chunks (PDF/Word)
@@ -118,6 +127,7 @@ This is the sole path for structured business data. No row embedding, no separat
 - Each point stores: vector, payload (metadata: source doc name/page, or table/column reference), and a `source_type` field used for filtering
 
 ### 3.4 Query Router
+
 - A lightweight LLM call (or simple rule-based classifier for MVP) that decides, per incoming question:
   - **Document path** → vector search in Qdrant's `docs` collection
   - **Database path** → NL2SQL → execute against SQL Server
@@ -125,6 +135,7 @@ This is the sole path for structured business data. No row embedding, no separat
 - (Future) could support questions that need both — e.g. "does the sales figure match what's in the contract PDF" — but that's out of scope for now
 
 ### 3.5 NL2SQL Safety Layer (critical, not optional)
+
 Because this path executes real generated SQL against real business databases:
 
 1. **Read-only DB user** — connection string uses a SQL login with SELECT-only permissions, enforced at the DB level (not just "trust the prompt")
@@ -134,6 +145,7 @@ Because this path executes real generated SQL against real business databases:
 5. **Logging** — log every generated SQL statement, for debugging accuracy and for audit trail
 
 ### 3.6 LLM Integration (`RagSystem.AI`)
+
 - Uses `Microsoft.Extensions.AI` abstractions:
   - `IChatClient` — for the router, NL2SQL generation, and final answer synthesis
   - `IEmbeddingGenerator<string, Embedding<float>>` — for embedding doc chunks and schema descriptions
@@ -141,6 +153,7 @@ Because this path executes real generated SQL against real business databases:
 - Abstraction means swapping to a local model later (e.g. via Ollama) is a config change, not a rewrite
 
 ### 3.7 API Layer (`RagSystem.Api`)
+
 - ASP.NET Core minimal API
 - Key endpoints (MVP):
   - `POST /ingest/documents` — upload/trigger doc ingestion
@@ -148,7 +161,7 @@ Because this path executes real generated SQL against real business databases:
   - `POST /query` — main Q&A endpoint (runs router → doc search or NL2SQL → synthesis)
 - Swagger/OpenAPI enabled for easy manual testing without building a UI first
 
-**Manual test (http://localhost:5098):**
+**Manual test ([http://localhost:5098](http://localhost:5098)):**
 
 ```bash
 # Ingest a Word document
@@ -180,18 +193,20 @@ RagSystem.sln
 
 ## 5. Technology Stack Summary
 
-| Layer | Technology |
-|---|---|
-| Language/Runtime | .NET 8/9 |
-| API | ASP.NET Core Minimal API |
-| Doc parsing | PdfPig, DocumentFormat.OpenXml |
-| Vector DB | Qdrant (self-hosted, Docker) |
-| Vector DB client | Qdrant.Client (.NET SDK) |
-| Structured DB | SQL Server (Sales, Inventory, extensible) |
-| DB access (dynamic queries) | Dapper |
-| SQL validation | Microsoft.SqlServer.TransactSql.ScriptDom |
-| LLM abstraction | Microsoft.Extensions.AI (`IChatClient`, `IEmbeddingGenerator`) |
-| LLM provider | OpenAI / Azure OpenAI (cloud, for now) |
+
+| Layer                       | Technology                                                     |
+| --------------------------- | -------------------------------------------------------------- |
+| Language/Runtime            | .NET 8/9                                                       |
+| API                         | ASP.NET Core Minimal API                                       |
+| Doc parsing                 | PdfPig, DocumentFormat.OpenXml                                 |
+| Vector DB                   | Qdrant (self-hosted, Docker)                                   |
+| Vector DB client            | Qdrant.Client (.NET SDK)                                       |
+| Structured DB               | SQL Server (Sales, Inventory, extensible)                      |
+| DB access (dynamic queries) | Dapper                                                         |
+| SQL validation              | Microsoft.SqlServer.TransactSql.ScriptDom                      |
+| LLM abstraction             | Microsoft.Extensions.AI (`IChatClient`, `IEmbeddingGenerator`) |
+| LLM provider                | OpenAI / Azure OpenAI (cloud, for now)                         |
+
 
 ---
 
@@ -209,49 +224,3 @@ services:
       - ./qdrant_storage:/qdrant/storage
 ```
 
----
-
-## 7. Weekend MVP Plan
-
-### Day 1 — Document RAG pipeline (get one path fully working end-to-end)
-- [ ] Spin up Qdrant via Docker Compose
-- [ ] Scaffold solution structure (projects above)
-- [ ] Implement `IDocumentLoader` for PDF (PdfPig) and Word (OpenXml)
-- [ ] Implement chunker (fixed-size + overlap)
-- [ ] Wire up `IEmbeddingGenerator` (Microsoft.Extensions.AI + OpenAI/Azure OpenAI)
-- [ ] Store chunks + embeddings in Qdrant `docs` collection
-- [ ] Build a basic `/query` endpoint that does vector search + LLM synthesis, returns answer + source citations
-- [ ] **Milestone**: ask a question about an uploaded PDF/Word doc and get a correct, cited answer
-
-### Day 2 — NL2SQL path + hybrid routing (pick ONE DB source, e.g. Sales)
-- [ ] Build schema catalog for the Sales DB (table/column descriptions, sample values)
-- [ ] Embed schema catalog into Qdrant `schema_catalog` collection
-- [ ] Implement NL2SQL prompt (schema context retrieved via catalog search + 5–8 few-shot examples specific to your Sales schema)
-- [ ] Implement SQL safety layer: read-only user, table allow-list, ScriptDom validation, row/time limits
-- [ ] Implement simple query router (LLM classifies DOCUMENT vs DATABASE)
-- [ ] Wire router into `/query` endpoint: route to Qdrant doc search OR NL2SQL execution accordingly
-- [ ] **Milestone**: ask a document question and a database question (both lookup-style and aggregation-style) through the same endpoint and get correct answers
-
-### Explicitly deferred (not this weekend)
-- Inventory DB and any additional sources
-- Oracle or other data source types
-- Local/self-hosted LLM option
-- Authentication/authorization
-- Hybrid queries that need both document and database answers merged into one response
-- Production-grade SQL sandboxing beyond the basics above
-- Front-end UI (Swagger is enough for now)
-
----
-
-## 8. Open Design Questions to Revisit Later
-- How should the schema catalog be kept in sync as the underlying DBs evolve (manual updates vs automated introspection job)?
-- Should the router support **multi-step** questions that need both a document lookup and a database query merged into one answer?
-- At what data volume does self-hosted Qdrant need to move to a managed/clustered setup?
-- What's the right citation format for database-sourced answers — show the user the generated SQL, or just the summarized result?
-- Should NL2SQL support simple write-back operations in the future, or should this remain permanently read-only?
-
----
-
-## 9. Project Name
-
-**RagSystem**
