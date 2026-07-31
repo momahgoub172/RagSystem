@@ -1,39 +1,69 @@
+// RagSystem.Api/Program.cs
 using RagSystem.AI;
+using RagSystem.Api;
 using RagSystem.Core.Interfaces;
 using RagSystem.Ingestion.Docs;
+using RagSystem.Ingestion.Sql;
 using RagSystem.VectorStore;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// --- Services ---
-builder.Services.AddQdrantVectorStore(host: "localhost", port: 6334);
+// ---------------------------------------------------------------------
+// Configuration values (from appsettings + user-secrets + env vars)
+// ---------------------------------------------------------------------
+var sqlAdminConnectionString = builder.Configuration.GetConnectionString("SqlServerAdmin")
+    ?? throw new InvalidOperationException("Missing ConnectionStrings:SqlServerAdmin");
 
-var openRouterApiKey = builder.Configuration["OpenRouter:ApiKey"];
-if (string.IsNullOrWhiteSpace(openRouterApiKey))
-    throw new InvalidOperationException(
-        "OpenRouter:ApiKey is missing. Set it with: dotnet user-secrets set \"OpenRouter:ApiKey\" \"...\"");
+var sqlReadOnlyConnectionString = builder.Configuration.GetConnectionString("SqlServerReadOnly")
+    ?? throw new InvalidOperationException("Missing ConnectionStrings:SqlServerReadOnly");
+
+var openRouterApiKey = builder.Configuration["OpenRouter:ApiKey"]
+    ?? throw new InvalidOperationException("Missing OpenRouter:ApiKey");
+
+// Tables the NL2SQL/safety layer is allowed to reference — extend as you add sources
+var allowedTables = new[] { "Customers", "Orders" };
+
+// ---------------------------------------------------------------------
+// Services
+// ---------------------------------------------------------------------
+builder.Services.AddQdrantVectorStore(host: "localhost", port: 6334);
 
 builder.Services.AddRagSystemAi(
     openRouterApiKey: openRouterApiKey,
     chatModel: "openai/gpt-4o-mini",
-    embeddingModel: "openai/text-embedding-3-small");
+    embeddingModel: "text-embedding-3-small");
 
 builder.Services.AddSingleton<IChunker, FixedSizeChunker>();
 builder.Services.AddSingleton<IDocumentLoader, WordDocumentLoader>();
 
+builder.Services.AddSingleton<EmbeddingService>();
+builder.Services.AddSingleton<AnswerService>();
+
+builder.Services.AddSingleton(new SchemaIntrospector(sqlAdminConnectionString));
+builder.Services.AddSingleton<SchemaCatalogBuilder>();
+builder.Services.AddSingleton<Nl2SqlGenerator>();
+builder.Services.AddSingleton(new SqlSafetyValidator(allowedTables));
+builder.Services.AddSingleton(new SqlQueryExecutor(sqlReadOnlyConnectionString));
+
+builder.Services.AddSingleton<QueryRouter>();
+
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-const string CollectionName = "docs";
-const ulong VectorSize = 1536; // must match embeddingModel dimension
+const string DocsCollection = "docs";
+const string SchemaCollection = "schema_catalog";
+const ulong VectorSize = 1536;
 
 var app = builder.Build();
 
-// Ensure the Qdrant collection exists at startup
+// ---------------------------------------------------------------------
+// Startup: ensure Qdrant collections exist
+// ---------------------------------------------------------------------
 using (var scope = app.Services.CreateScope())
 {
-    var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
-    await vectorStore.EnsureCollectionAsync(CollectionName, VectorSize);
+    var vectorStore = (QdrantVectorStore)scope.ServiceProvider.GetRequiredService<IVectorStore>();
+    await vectorStore.EnsureCollectionAsync(DocsCollection, VectorSize);
+    await vectorStore.EnsureCollectionAsync(SchemaCollection, VectorSize);
 }
 
 if (app.Environment.IsDevelopment())
@@ -42,8 +72,9 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-// --- Endpoints ---
-
+// ---------------------------------------------------------------------
+// Endpoint: ingest a Word document
+// ---------------------------------------------------------------------
 app.MapPost("/ingest/documents", async (
     IFormFile file,
     IDocumentLoader loader,
@@ -53,7 +84,6 @@ app.MapPost("/ingest/documents", async (
     if (!loader.CanHandle(file.FileName))
         return Results.BadRequest($"Unsupported file type: {file.FileName}");
 
-    // Save to a temp path since loaders work off disk paths
     var tempPath = Path.Combine(Path.GetTempPath(), file.FileName);
     await using (var stream = File.Create(tempPath))
     {
@@ -67,7 +97,7 @@ app.MapPost("/ingest/documents", async (
 
         foreach (var (chunk, vector) in embedded)
         {
-            await vectorStore.UpsertAsync(CollectionName, chunk, vector);
+            await vectorStore.UpsertAsync(DocsCollection, chunk, vector);
         }
 
         return Results.Ok(new { file = file.FileName, chunksIngested = embedded.Count });
@@ -80,27 +110,98 @@ app.MapPost("/ingest/documents", async (
 .DisableAntiforgery()
 .WithName("IngestDocument");
 
+// ---------------------------------------------------------------------
+// Endpoint: (re)build the schema catalog for NL2SQL
+// ---------------------------------------------------------------------
+app.MapPost("/ingest/schema", async (
+    SchemaIntrospector introspector,
+    SchemaCatalogBuilder catalogBuilder,
+    EmbeddingService embeddingService,
+    IVectorStore vectorStore) =>
+{
+    var schema = await introspector.GetSchemaAsync(allowedTables);
+    var entries = catalogBuilder.BuildCatalogEntries(schema).ToList();
+
+    foreach (var (tableName, text) in entries)
+    {
+        var embedding = await embeddingService.EmbedTextAsync(text);
+        var chunk = new RagSystem.Core.Models.DocumentChunk
+        {
+            Id = $"schema_{tableName}",
+            Content = text,
+            SourceFile = "schema_catalog",
+            ChunkIndex = 0
+        };
+        await vectorStore.UpsertAsync(SchemaCollection, chunk, embedding);
+    }
+
+    return Results.Ok(new { tablesIndexed = entries.Select(e => e.TableName) });
+})
+.WithName("IngestSchema");
+
+// ---------------------------------------------------------------------
+// Endpoint: main query — routes to Document or Database path
+// ---------------------------------------------------------------------
 app.MapPost("/query", async (
     QueryRequest request,
+    QueryRouter router,
     EmbeddingService embeddingService,
     IVectorStore vectorStore,
-    AnswerService answerService) =>
+    AnswerService answerService,
+    Nl2SqlGenerator nl2Sql,
+    SqlSafetyValidator validator,
+    SqlQueryExecutor executor) =>
 {
-    var queryEmbedding = await embeddingService.EmbedTextAsync(request.Question);
-    var topChunks = await vectorStore.SearchAsync(CollectionName, queryEmbedding, request.TopK ?? 5);
+    var intent = await router.ClassifyAsync(request.Question);
 
-    if (!topChunks.Any())
-        return Results.Ok(new { answer = "No relevant documents found.", sources = Array.Empty<string>() });
+    if (intent == QueryIntent.Document)
+    {
+        var queryEmbedding = await embeddingService.EmbedTextAsync(request.Question);
+        var topChunks = await vectorStore.SearchAsync(DocsCollection, queryEmbedding, request.TopK ?? 5);
 
-    var answer = await answerService.AnswerAsync(request.Question, topChunks);
-    var sources = topChunks.Select(c => c.Chunk.SourceFile).Distinct();
+        if (!topChunks.Any())
+            return Results.Ok(new { intent = "document", answer = "No relevant documents found.", sources = Array.Empty<string>() });
 
-    return Results.Ok(new { answer, sources });
+        var answer = await answerService.AnswerAsync(request.Question, topChunks);
+        var sources = topChunks.Select(c => c.Chunk.SourceFile).Distinct();
+
+        return Results.Ok(new { intent = "document", answer, sources });
+    }
+    else
+    {
+        var queryEmbedding = await embeddingService.EmbedTextAsync(request.Question);
+        var relevantTables = await vectorStore.SearchAsync(SchemaCollection, queryEmbedding, topK: 3);
+        var schemaContext = string.Join("\n\n", relevantTables.Select(t => t.Chunk.Content));
+
+        var sql = await nl2Sql.GenerateSqlAsync(request.Question, schemaContext);
+
+        var validation = validator.Validate(sql);
+        if (!validation.IsValid)
+        {
+            return Results.BadRequest(new
+            {
+                intent = "database",
+                error = "Generated SQL failed safety validation.",
+                detail = validation.Error,
+                sql
+            });
+        }
+
+        var rows = await executor.ExecuteAsync(sql);
+
+        var summaryPrompt = $"""
+            Question: {request.Question}
+            Query result (JSON): {System.Text.Json.JsonSerializer.Serialize(rows)}
+
+            Answer the question in natural language based on this data.
+            """;
+        var finalAnswer = await answerService.AnswerRawAsync(summaryPrompt);
+
+        return Results.Ok(new { intent = "database", answer = finalAnswer, sql });
+    }
 })
 .WithName("Query");
 
 app.Run();
-
-public partial class Program;
 
 record QueryRequest(string Question, int? TopK = null);

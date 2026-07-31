@@ -45,4 +45,11 @@ public class AnswerService
         var response = await _chatClient.GetResponseAsync(messages);
         return response.Text ?? string.Empty;
     }
+
+    public async Task<string> AnswerRawAsync(string prompt)
+{
+    var messages = new List<ChatMessage> { new(ChatRole.User, prompt) };
+    var response = await _chatClient.GetResponseAsync(messages);
+    return response.Text;
+}
 }

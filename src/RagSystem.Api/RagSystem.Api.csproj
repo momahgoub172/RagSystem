@@ -12,6 +12,12 @@
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.2.3" />
   </ItemGroup>
 
+<ItemGroup>
+  <Content Update="schema-descriptions.json">
+    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+  </Content>
+</ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\RagSystem.Core\RagSystem.Core.csproj" />
     <ProjectReference Include="..\RagSystem.AI\RagSystem.AI.csproj" />
