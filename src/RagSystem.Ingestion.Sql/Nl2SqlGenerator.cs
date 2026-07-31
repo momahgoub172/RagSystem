@@ -38,6 +38,21 @@ public class Nl2SqlGenerator
     SQL: SELECT TOP 5 OrderId, TotalAmount, OrderDate
          FROM Orders
          ORDER BY TotalAmount DESC;
+
+    Q: "Show the top 3 highest-value orders per region"
+    SQL: WITH RankedOrders AS (
+             SELECT c.Region, o.OrderId, o.TotalAmount, o.OrderDate,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY c.Region
+                        ORDER BY o.TotalAmount DESC
+                    ) AS OrderRank
+             FROM Orders o
+             JOIN Customers c ON o.CustomerId = c.CustomerId
+         )
+         SELECT Region, OrderId, TotalAmount, OrderDate
+         FROM RankedOrders
+         WHERE OrderRank <= 3
+         ORDER BY Region, TotalAmount DESC;
     """;
 
     public Nl2SqlGenerator(IChatClient chatClient)
@@ -60,6 +75,7 @@ public class Nl2SqlGenerator
         General rules:
         - Only generate a single SELECT statement. Never INSERT, UPDATE, DELETE, DROP, or any DDL/DML other than SELECT.
         - Only reference tables/columns shown in the schema context below.
+        - When a query uses more than one table, assign each table an alias and qualify EVERY reference to a source column with its table alias. This includes SELECT, JOIN, WHERE, GROUP BY, ORDER BY, and window-function PARTITION BY / ORDER BY clauses. For example, use o.CustomerId and c.CustomerId, never bare CustomerId.
         - Return ONLY the raw SQL, no explanation, no markdown code fences.
 
         Schema context:

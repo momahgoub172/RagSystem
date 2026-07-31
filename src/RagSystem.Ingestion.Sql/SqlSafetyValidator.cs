@@ -47,7 +47,7 @@ public class SqlSafetyValidator
         fragment.Accept(tableVisitor);
 
         var disallowed = tableVisitor.TableNames
-            .Where(t => !_allowedTables.Contains(t))
+            .Where(t => !_allowedTables.Contains(t) && !tableVisitor.CommonTableExpressionNames.Contains(t))
             .ToList();
 
         if (disallowed.Any())
@@ -65,6 +65,13 @@ public class SqlSafetyValidator
     private class TableNameVisitor : TSqlFragmentVisitor
     {
         public List<string> TableNames { get; } = new();
+        public HashSet<string> CommonTableExpressionNames { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public override void Visit(CommonTableExpression node)
+        {
+            CommonTableExpressionNames.Add(node.ExpressionName.Value);
+            base.Visit(node);
+        }
 
         public override void Visit(NamedTableReference node)
         {

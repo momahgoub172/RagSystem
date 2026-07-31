@@ -5,6 +5,7 @@ using RagSystem.Core.Interfaces;
 using RagSystem.Ingestion.Docs;
 using RagSystem.Ingestion.Sql;
 using RagSystem.VectorStore;
+using Microsoft.Data.SqlClient;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -187,7 +188,21 @@ app.MapPost("/query", async (
             });
         }
 
-        var rows = await executor.ExecuteAsync(sql);
+        IEnumerable<dynamic> rows;
+        try
+        {
+            rows = await executor.ExecuteAsync(sql);
+        }
+        catch (SqlException exception)
+        {
+            return Results.BadRequest(new
+            {
+                intent = "database",
+                error = "Generated SQL could not be executed.",
+                detail = exception.Message,
+                sql
+            });
+        }
 
         var summaryPrompt = $"""
             Question: {request.Question}
