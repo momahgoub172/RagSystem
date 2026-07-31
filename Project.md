@@ -1,226 +1,261 @@
-# RagSystem — Hybrid RAG Project Plan
+# RagSystem
 
-> A .NET-based Retrieval-Augmented Generation system combining unstructured document search (PDF/Word) with structured business data (SQL Server: Sales, Inventory, and future sources), unified through Qdrant vector search (for documents) and NL2SQL (for structured data), with a cloud LLM synthesizing final answers.
+RagSystem is a .NET 10 hybrid retrieval-augmented generation (RAG) API. It
+answers either document questions or SQL Server questions by routing a natural
+language prompt to the appropriate retrieval path.
 
----
-
-## 1. Project Overview
-
-### 1.1 Goal
-
-Build a system that lets users ask natural-language questions and get accurate answers drawn from two very different kinds of sources:
-
-1. **Unstructured documents** — PDFs, Word docs (policies, manuals, reports, etc.)
-2. **Structured business databases** — existing SQL Server DBs for internal apps (Sales, Inventory, and more later)
-
-The system should be smart enough to know *which kind of source* a question needs, and route accordingly.
-
-### 1.2 Why this is hard (and interesting)
-
-A normal RAG system just embeds documents and does similarity search. This project is harder because:
-
-- Structured data (sales figures, inventory counts) doesn't answer well from embeddings alone — "total sales last quarter" needs a real query, not vector similarity.
-- Documents need semantic search since there's no fixed schema to query against.
-- The system needs a **router** that decides which path a question needs: document search or a live database query.
-
-### 1.3 Scope boundaries (what this project is NOT, for now)
-
-- Not a general "connect any database" product — starts with SQL Server only
-- Not using a local/self-hosted LLM yet — cloud LLM (OpenAI/Azure OpenAI) for now
-- Not handling write/update operations — read-only, question-answering only
-- Not building fine-grained user auth/permissions in the MVP
-- **Not embedding structured DB rows into the vector store** — structured data is answered exclusively through NL2SQL (live queries), not through semantic/vector search. This keeps structured answers always accurate and current, and keeps the system simpler to build and reason about.
-
----
-
-## 2. High-Level Architecture
+## Current implementation
 
 ```
-┌──────────────┐     ┌─────────────────────┐
-│ PDF / Word   │     │ SQL Server DBs       │
-│ Documents    │     │ (Sales, Inventory..) │
-└──────┬───────┘     └──────────┬──────────┘
-       │                        │
-       v                        v
-  Doc Loader              Schema Introspector
-  + Chunker               (table/column catalog)
-       │                        │
-       v                        v
-   Embed (text-embedding)  Embed (schema descriptions only)
-       │                        │
-       └────────────┬───────────┘
-                     v
-              ┌─────────────┐
-              │   Qdrant     │  (Docker)
-              │ collections: │
-              │  - docs      │
-              │  - schema_catalog │
-              └──────┬──────┘
-                     │
-                     v
-         ┌───────────────────────┐
-         │   Query Router (LLM)   │
-         │  classifies intent:    │
-         │  document vs database  │
-         └─────┬─────────────┬───┘
-               │             │
-       Document path   Database path
-       (vector search   (NL2SQL → run
-        in "docs")       query on SQL
-               │          Server directly)
-               └──────┬──────┘
-                      v
-              Cloud LLM (IChatClient)
-              synthesizes final answer
-                      │
-                      v
-              Answer + source citations
-              (doc/page or SQL query used)
+                    ┌────────────────────┐
+                    │ POST /query         │
+                    └─────────┬──────────┘
+                              │
+                       LLM intent router
+                         ┌────┴────┐
+                         │         │
+                 document path  database path
+                         │         │
+                Qdrant `docs`  Qdrant `schema_catalog`
+                         │         │
+                    answer LLM  NL2SQL generator
+                         │         │
+                         └────┬────┘
+                              │
+                       JSON response
 ```
 
-**Key change from earlier drafts:** structured data (Sales, Inventory) is *never* embedded into Qdrant as row/aggregate summaries. The only thing from the SQL side that touches Qdrant is the **schema catalog** (table/column descriptions), which helps the NL2SQL step pick the right tables — it does not represent actual business data.
+The vector store is used for document chunks and SQL schema metadata only.
+Business rows are never embedded: database questions execute a live, validated,
+read-only SQL Server query.
 
----
+| Area | Current behavior |
+| --- | --- |
+| Runtime | .NET 10 / ASP.NET Core minimal API |
+| LLM and embeddings | OpenRouter through `Microsoft.Extensions.AI`; configured models are `openai/gpt-4o-mini` and `text-embedding-3-small` |
+| Vector database | Qdrant via gRPC on `localhost:6334`, using cosine vectors of size 1536 |
+| Document format | Word (`.docx`; `.doc` is accepted by the extension check) through Open XML; PDF ingestion is not implemented |
+| SQL source | SQL Server through Dapper and `Microsoft.Data.SqlClient` |
+| Current SQL allow-list | `Customers`, `Orders` |
 
-## 3. Core Components Explained
+## API
 
-### 3.1 Document Ingestion (`RagSystem.Ingestion.Docs`)
+The development launch profile serves HTTP at `http://localhost:5098`.
+Swagger is enabled in the Development environment.
 
-Handles PDF and Word files.
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /ingest/documents` | Upload a Word document as `multipart/form-data` field `file`, chunk it, embed it, and upsert it to Qdrant's `docs` collection. Re-ingesting the same chunk ID replaces it. |
+| `POST /ingest/schema` | Read the allow-listed SQL Server tables, build one catalog entry per table, embed it, and upsert it to `schema_catalog`. Run this after changing the database schema. |
+| `POST /query` | Classify the supplied `question` as a document or database question and execute the matching retrieval flow. `topK` is optional and applies to document retrieval. |
 
-- **PDF parsing**: `PdfPig` (pure .NET, no native dependencies) — extracts text per page
-- **Word parsing**: `DocumentFormat.OpenXml` — extracts paragraphs/headings/tables
-- **Interface**: `IDocumentLoader` so new formats (e.g. `.txt`, `.md`, `.pptx`) can be added later without touching the pipeline
-- **Chunking**: split extracted text into overlapping chunks (~300–500 tokens, ~10–15% overlap) to preserve context across chunk boundaries. Chunk size is a tuning knob — too small loses context, too large dilutes relevance.
-- **Metadata per chunk**: source file name, page number, chunk index — needed later for citations
-- **Storage**: embedded and stored in Qdrant's `docs` collection
+### Query responses
 
-### 3.2 Structured Data — NL2SQL Only (`RagSystem.Ingestion.Sql`)
+Document responses contain `intent`, `answer`, and `sources`. Database
+responses contain `intent`, `answer`, and the generated `sql`.
 
-This is the sole path for structured business data. No row embedding, no separate semantic search over DB content — every question about Sales/Inventory/etc. is answered by generating and running a real SQL query.
+If SQL generation or execution cannot proceed, `/query` returns HTTP 400 with
+`intent: "database"`, `error`, `detail`, and `sql`. This makes generated-SQL
+failures diagnosable without exposing an ASP.NET developer exception page.
 
-**a) Schema Catalog (supports NL2SQL routing)**
+## Database-query flow and safeguards
 
-- A small metadata store describing each table/column in plain language (name, type, short description, sample values)
-- This catalog is embedded into Qdrant (`schema_catalog` collection) — **this is metadata about the schema, not the actual data**
-- When a question comes in, vector search over the catalog finds the 3–5 most relevant tables — these get included in the NL2SQL prompt instead of dumping the entire schema (saves tokens, improves accuracy)
+1. The router classifies sales, orders, customers, counts, totals, and records
+   as database questions; policy/manual/text questions go to document search.
+2. The API embeds the database question and retrieves the three most relevant
+   schema-catalog entries.
+3. The NL2SQL generator receives that schema context plus T-SQL rules and
+   few-shot examples, including a per-region ranking query.
+4. `SqlSafetyValidator` parses the result with ScriptDom. It permits exactly
+   one `SELECT` statement, allows CTE names, and rejects physical tables outside
+   the allow-list.
+5. `SqlQueryExecutor` runs the validated SQL on the read-only connection with a
+   10-second command timeout and a maximum of 200 returned rows. The row cap is
+   connection-scoped (`SET ROWCOUNT`) rather than a string rewrite, so valid
+   queries using `DISTINCT`, CTEs, and subqueries are preserved unchanged.
+6. The answer service summarizes the returned rows in natural language.
 
-**b) NL2SQL Generation**
+The database login named by `ConnectionStrings:SqlServerReadOnly` must have
+only the permissions appropriate for read access. The validator is a second
+line of defense, not a substitute for database permissions.
 
-- User question → LLM generates a real SQL query (using schema context + few-shot examples) → query executes against the actual DB (read-only)
-- Handles both simple lookups ("show me Acme Corp's overdue invoices") and aggregations ("total sales last quarter by region") — since it's always a live query, there's no distinction needed between "semantic" and "analytic" structured questions anymore. NL2SQL handles both.
-- Results come back as rows, which the LLM then formats into a natural-language answer
+## Local setup
 
-**c) Why no row embedding**
+Prerequisites:
 
-- Simpler system: one path for structured data, not two
-- Always accurate: live query means no stale summaries to keep in sync
-- Avoids the "embeddings can't do math" failure mode entirely, since nothing structured is ever approximated via similarity search
+- .NET 10 SDK
+- SQL Server with the `Customers` and `Orders` tables and separate admin and
+  read-only connection strings
+- Qdrant listening on gRPC port 6334
+- An OpenRouter API key
 
-### 3.3 Vector Store — Qdrant (`RagSystem.VectorStore`)
-
-- Self-hosted via Docker (see section 6)
-- Now holds only two collections:
-  - `docs` — document chunks (PDF/Word)
-  - `schema_catalog` — table/column descriptions used to select relevant tables for NL2SQL prompts
-- Accessed via the official `Qdrant.Client` .NET SDK
-- Each point stores: vector, payload (metadata: source doc name/page, or table/column reference), and a `source_type` field used for filtering
-
-### 3.4 Query Router
-
-- A lightweight LLM call (or simple rule-based classifier for MVP) that decides, per incoming question:
-  - **Document path** → vector search in Qdrant's `docs` collection
-  - **Database path** → NL2SQL → execute against SQL Server
-- MVP can start simple: a single LLM call with a system prompt like *"classify this question as DOCUMENT or DATABASE"* — no need for a trained classifier yet
-- (Future) could support questions that need both — e.g. "does the sales figure match what's in the contract PDF" — but that's out of scope for now
-
-### 3.5 NL2SQL Safety Layer (critical, not optional)
-
-Because this path executes real generated SQL against real business databases:
-
-1. **Read-only DB user** — connection string uses a SQL login with SELECT-only permissions, enforced at the DB level (not just "trust the prompt")
-2. **Table allow-list** — only pre-approved tables/views can be referenced; reject anything outside it
-3. **SQL structure validation** — parse the generated SQL using `Microsoft.SqlServer.TransactSql.ScriptDom` (native .NET T-SQL parser) to confirm it's a single, well-formed `SELECT` statement before execution
-4. **Row limits & timeouts** — cap result set size and query execution time to protect the production DB
-5. **Logging** — log every generated SQL statement, for debugging accuracy and for audit trail
-
-### 3.6 LLM Integration (`RagSystem.AI`)
-
-- Uses `Microsoft.Extensions.AI` abstractions:
-  - `IChatClient` — for the router, NL2SQL generation, and final answer synthesis
-  - `IEmbeddingGenerator<string, Embedding<float>>` — for embedding doc chunks and schema descriptions
-- Backed by OpenAI or Azure OpenAI for now
-- Abstraction means swapping to a local model later (e.g. via Ollama) is a config change, not a rewrite
-
-### 3.7 API Layer (`RagSystem.Api`)
-
-- ASP.NET Core minimal API
-- Key endpoints (MVP):
-  - `POST /ingest/documents` — upload/trigger doc ingestion
-  - `POST /ingest/schema/{source}` — (re)build schema catalog for a given DB source
-  - `POST /query` — main Q&A endpoint (runs router → doc search or NL2SQL → synthesis)
-- Swagger/OpenAPI enabled for easy manual testing without building a UI first
-
-**Manual test ([http://localhost:5098](http://localhost:5098)):**
+Configure secrets outside source control, for example with user secrets:
 
 ```bash
-# Ingest a Word document
-curl -X POST http://localhost:5098/ingest/documents \
-  -F "file=@/Users/goba/Programming/Projects/RagSystem/BCT_Orange Intranet Portal Migration & Revamp -RSD.docx"
+dotnet user-secrets set "ConnectionStrings:SqlServerAdmin" "<admin connection string>" --project src/RagSystem.Api
+dotnet user-secrets set "ConnectionStrings:SqlServerReadOnly" "<read-only connection string>" --project src/RagSystem.Api
+dotnet user-secrets set "OpenRouter:ApiKey" "<api key>" --project src/RagSystem.Api
+```
 
-# Ask a question
+Start the API and then build the schema catalog before database queries:
+
+```bash
+dotnet run --project src/RagSystem.Api
+
+curl -X POST http://localhost:5098/ingest/schema
+```
+
+To ingest a document:
+
+```bash
+curl -X POST http://localhost:5098/ingest/documents \
+  -F "file=@/absolute/path/to/document.docx"
+```
+
+To query it:
+
+```bash
 curl -X POST http://localhost:5098/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "what is orange project?"}'
+  -d '{"question":"Show the top 3 highest-value orders per region"}'
 ```
+
+## Verification
+
+Run the unit-test project and build the solution:
+
+```bash
+dotnet test tests/RagSystem.Tests/RagSystem.Tests.csproj
+dotnet build RagSystem.sln
+```
+
+The executable smoke test sends six increasingly complex database questions to
+a running API and checks that each produces a successful database response with
+both SQL and an answer. It requires `curl` and `jq`.
+
+```bash
+./scripts/nl2sql-smoke-test.sh
+
+# Use a different API host if needed.
+API_BASE_URL=http://localhost:8080 ./scripts/nl2sql-smoke-test.sh
+```
+
+The covered query patterns are above-average values, per-group ranking,
+month-over-month revenue, aggregate `HAVING`, percentages by region, and a
+relative date range with a numeric filter. The script prints the generated SQL
+and answer for each case, and exits nonzero on any failed case.
+
+### Validated chatbot examples
+
+The following user/chatbot exchanges were returned during a successful
+six-query smoke-test run against the current sample database.
+
+> **User**
+>
+> Which customers have placed orders above the average order value?
+>
+> **Chatbot**
+>
+> The customers who have placed orders above the average order value are as follows:
+>
+> 1. Acme Corp (Customer ID: 1)
+> 2. Globex Inc (Customer ID: 2)
+> 3. Initech (Customer ID: 3)
+>
+> Additionally, there is a large number of customers from "Soylent Corp" with IDs ranging from 4 to 200 who have also placed orders above the average order value. This includes clients like Soylent Corp #1 (Customer ID: 4), Soylent Corp #2 (Customer ID: 5), and so on, all the way through to Soylent Corp #197 (Customer ID: 200).
+>
+> In total, there are 200 customers listed who have all placed orders above the average order value.
 
 ---
 
-## 4. Suggested Solution Structure
-
-```
-RagSystem.sln
- ├─ RagSystem.Api                 (endpoints, query router entrypoint)
- ├─ RagSystem.Core                (shared interfaces: IDocumentLoader, ISqlSource, IVectorStore)
- ├─ RagSystem.Ingestion.Docs      (PDF/Word loaders + chunker)
- ├─ RagSystem.Ingestion.Sql       (schema introspection, NL2SQL generation, safety validation)
- ├─ RagSystem.VectorStore         (Qdrant client wrapper, collection management)
- ├─ RagSystem.AI                  (IChatClient / IEmbeddingGenerator wiring, prompt templates)
- └─ RagSystem.Tests               (unit/integration tests)
-```
-
----
-
-## 5. Technology Stack Summary
-
-
-| Layer                       | Technology                                                     |
-| --------------------------- | -------------------------------------------------------------- |
-| Language/Runtime            | .NET 8/9                                                       |
-| API                         | ASP.NET Core Minimal API                                       |
-| Doc parsing                 | PdfPig, DocumentFormat.OpenXml                                 |
-| Vector DB                   | Qdrant (self-hosted, Docker)                                   |
-| Vector DB client            | Qdrant.Client (.NET SDK)                                       |
-| Structured DB               | SQL Server (Sales, Inventory, extensible)                      |
-| DB access (dynamic queries) | Dapper                                                         |
-| SQL validation              | Microsoft.SqlServer.TransactSql.ScriptDom                      |
-| LLM abstraction             | Microsoft.Extensions.AI (`IChatClient`, `IEmbeddingGenerator`) |
-| LLM provider                | OpenAI / Azure OpenAI (cloud, for now)                         |
-
+> **User**
+>
+> Show the top 3 highest-value orders per region
+>
+> **Chatbot**
+>
+> The top three highest-value orders per region are as follows:
+>
+> **East Region:**
+> 1. Order ID 1960 with a total amount of $47,316.62, placed on May 26, 2025.
+> 2. Order ID 1096 with a total amount of $44,296.43, placed on August 27, 2025.
+> 3. Order ID 797 with a total amount of $43,887.78, placed on May 13, 2026.
+>
+> **West Region:**
+> 1. Order ID 1029 with a total amount of $49,977.58, placed on April 30, 2026.
+> 2. Order ID 2223 with a total amount of $49,972.30, placed on December 10, 2024.
+> 3. Order ID 535 with a total amount of $49,950.55, placed on December 25, 2025.
+>
+> These orders represent the highest values in their respective regions.
 
 ---
 
-## 6. Docker Compose (Qdrant) — Reference
+> **User**
+>
+> Compare total revenue this month versus last month
+>
+> **Chatbot**
+>
+> This month, the total revenue is $3,187,087.31, while last month it was $3,205,515.05. This shows a decrease in revenue of $18,427.74 compared to last month.
 
-```yaml
-version: "3.8"
-services:
-  qdrant:
-    image: qdrant/qdrant:latest
-    ports:
-      - "6333:6333"   # REST API
-      - "6334:6334"   # gRPC
-    volumes:
-      - ./qdrant_storage:/qdrant/storage
+---
+
+> **User**
+>
+> Which regions have more than 50 overdue orders?
+>
+> **Chatbot**
+>
+> Based on the query results, there are no regions that have more than 50 overdue orders.
+
+---
+
+> **User**
+>
+> What percentage of orders are overdue, broken down by region?
+>
+> **Chatbot**
+>
+> Based on the provided data, there are no overdue orders in the East region, while the West region has an overdue percentage of approximately 6.7%.
+
+---
+
+> **User**
+>
+> How many orders were placed in the last 90 days with a value over $10,000?
+>
+> **Chatbot**
+>
+> In the last 90 days, there were 302 orders placed with a value over $10,000.
+
+---
+
+## Solution layout
+
+```
+src/
+  RagSystem.Api             Minimal API, endpoint orchestration, intent router
+  RagSystem.AI              OpenRouter client, embeddings, answer generation
+  RagSystem.Core            Shared models and interfaces
+  RagSystem.Ingestion.Docs  Word loader and fixed-size chunker
+  RagSystem.Ingestion.Sql   Schema catalog, NL2SQL, validation, execution
+  RagSystem.VectorStore     Qdrant-backed vector-store implementation
+tests/
+  RagSystem.Tests           Unit-test project
+scripts/
+  nl2sql-smoke-test.sh      Live API smoke test for NL2SQL
 ```
 
+## Known gaps and next steps
+
+- PDF and additional document loaders are not implemented.
+- Schema descriptions are currently emitted from SQL metadata; the
+  `SchemaDescriptionProvider` and its JSON enrichment are not wired into the
+  API.
+- The SQL allow-list and Qdrant connection are currently configured in code.
+  Multi-source SQL configuration is not yet active.
+- There is no authentication, authorization, query audit log, retry/repair
+  loop for invalid generated SQL, or combined document-and-database answering.
+- Generated SQL is checked for safety and executability, but semantic accuracy
+  still depends on the model and should be evaluated against representative
+  business data before production use.
