@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>7f9c9d70-3280-480b-ab42-d581415c9787</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.6" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="10.2.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RagSystem.Core\RagSystem.Core.csproj" />
+    <ProjectReference Include="..\RagSystem.AI\RagSystem.AI.csproj" />
+    <ProjectReference Include="..\RagSystem.VectorStore\RagSystem.VectorStore.csproj" />
+    <ProjectReference Include="..\RagSystem.Ingestion.Docs\RagSystem.Ingestion.Docs.csproj" />
+    <ProjectReference Include="..\RagSystem.Ingestion.Sql\RagSystem.Ingestion.Sql.csproj" />
+  </ItemGroup>
+
+</Project>

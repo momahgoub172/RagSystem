@@ -1,0 +1,9 @@
+@RagSystem.Api_HostAddress = http://localhost:5098
+
+### Ask a question
+POST http://localhost:5098/query
+Content-Type: application/json
+
+{
+  "question": "What is the refund policy?"
+}

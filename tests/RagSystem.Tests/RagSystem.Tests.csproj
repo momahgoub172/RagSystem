@@ -1,0 +1,30 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RagSystem.Core\RagSystem.Core.csproj" />
+    <ProjectReference Include="..\..\src\RagSystem.AI\RagSystem.AI.csproj" />
+    <ProjectReference Include="..\..\src\RagSystem.VectorStore\RagSystem.VectorStore.csproj" />
+    <ProjectReference Include="..\..\src\RagSystem.Ingestion.Docs\RagSystem.Ingestion.Docs.csproj" />
+    <ProjectReference Include="..\..\src\RagSystem.Ingestion.Sql\RagSystem.Ingestion.Sql.csproj" />
+    <ProjectReference Include="..\..\src\RagSystem.Api\RagSystem.Api.csproj" />
+  </ItemGroup>
+
+</Project>
