@@ -11,7 +11,7 @@ public class SqlQueryExecutor
         _readOnlyConnectionString = readOnlyConnectionString;
     }
 
-    public async Task<IEnumerable<dynamic>> ExecuteAsync(string sql, int maxRows = 200, int timeoutSeconds = 10)
+    public async Task<IEnumerable<dynamic>> ExecuteAsync(string sql, int maxRows = 5000, int timeoutSeconds = 10)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxRows);
 

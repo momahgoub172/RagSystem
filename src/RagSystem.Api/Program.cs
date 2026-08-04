@@ -210,12 +210,17 @@ app.MapPost("/query", async (
                 sql
             });
         }
+        var rowList = rows.ToList();
+        var wasTruncated = rowList.Count > 20;
+        var rowsForPrompt = rowList.Take(20);
 
         var summaryPrompt = $"""
             Question: {request.Question}
-            Query result (JSON): {System.Text.Json.JsonSerializer.Serialize(rows)}
+            Query returned {rowList.Count} total row(s){(wasTruncated ? " (showing first 20 below)" : "")}.
+            Query result (JSON): {System.Text.Json.JsonSerializer.Serialize(rowsForPrompt)}
 
             Answer the question in natural language based on this data.
+            {(wasTruncated ? "Since there are many results, summarize patterns/counts rather than listing every row individually." : "")}
             """;
         var finalAnswer = await answerService.AnswerRawAsync(summaryPrompt);
 
