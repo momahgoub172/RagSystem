@@ -1,8 +1,40 @@
 {
-  "YourTableName": {
-    "description": "Short description of what this table stores",
+  "Customers": {
+    "description": "Customer accounts, one row per company.",
     "columns": {
-      "YourColumnName": "What this column means"
+      "Region": "Sales region the customer is assigned to: West, East, North, South, or Central.",
+      "Industry": "Customer's industry vertical, e.g. Retail, Technology, Healthcare.",
+      "SignupDate": "Date the customer account was created."
+    }
+  },
+  "Orders": {
+    "description": "Sales orders placed by customers.",
+    "columns": {
+      "Status": "Order lifecycle state: Paid, Overdue, Pending, Cancelled, or Refunded.",
+      "TotalAmount": "Total monetary value of the order in USD.",
+      "OrderDate": "Date the order was placed."
+    }
+  },
+  "Products": {
+    "description": "Product catalog.",
+    "columns": {
+      "Category": "Product category, e.g. Electronics, Furniture, Software Licenses.",
+      "UnitPrice": "List price per unit in USD."
+    }
+  },
+  "Inventory": {
+    "description": "Stock levels per product per warehouse.",
+    "columns": {
+      "QuantityOnHand": "Current units in stock at this warehouse.",
+      "ReorderThreshold": "Stock level below which the product should be reordered.",
+      "Warehouse": "Warehouse location code."
+    }
+  },
+  "OrderItems": {
+    "description": "Line items belonging to an order, one row per product within an order.",
+    "columns": {
+      "Quantity": "Number of units of this product in the order.",
+      "UnitPrice": "Price per unit at time of order (may differ from current Products.UnitPrice)."
     }
   }
 }

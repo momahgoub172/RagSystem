@@ -21,9 +21,11 @@ var sqlReadOnlyConnectionString = builder.Configuration.GetConnectionString("Sql
 var openRouterApiKey = builder.Configuration["OpenRouter:ApiKey"]
     ?? throw new InvalidOperationException("Missing OpenRouter:ApiKey");
 
-// Tables the NL2SQL/safety layer is allowed to reference — extend as you add sources
-var allowedTables = new[] { "Customers", "Orders" };
+var allowedTables = builder.Configuration.GetSection("Sql:AllowedTables").Get<string[]>()
+    ?? throw new InvalidOperationException("Missing Sql:AllowedTables configuration");
 
+// Add near the top with other config values
+var schemaDescriptionsPath = Path.Combine(AppContext.BaseDirectory, "schema-descriptions.json");
 // ---------------------------------------------------------------------
 // Services
 // ---------------------------------------------------------------------
@@ -40,7 +42,11 @@ builder.Services.AddSingleton<IDocumentLoader, WordDocumentLoader>();
 builder.Services.AddSingleton<EmbeddingService>();
 builder.Services.AddSingleton<AnswerService>();
 
-builder.Services.AddSingleton(new SchemaIntrospector(sqlAdminConnectionString));
+builder.Services.AddSingleton<ISchemaDescriptionProvider>(
+    new SchemaDescriptionProvider(schemaDescriptionsPath));
+builder.Services.AddSingleton<SchemaIntrospector>(sp => new SchemaIntrospector(sqlAdminConnectionString, sp.GetRequiredService<ISchemaDescriptionProvider>()));
+
+
 builder.Services.AddSingleton<SchemaCatalogBuilder>();
 builder.Services.AddSingleton<Nl2SqlGenerator>();
 builder.Services.AddSingleton(new SqlSafetyValidator(allowedTables));
@@ -121,6 +127,7 @@ app.MapPost("/ingest/schema", async (
     IVectorStore vectorStore) =>
 {
     var schema = await introspector.GetSchemaAsync(allowedTables);
+    Console.WriteLine(schema.ToString());
     var entries = catalogBuilder.BuildCatalogEntries(schema).ToList();
 
     foreach (var (tableName, text) in entries)

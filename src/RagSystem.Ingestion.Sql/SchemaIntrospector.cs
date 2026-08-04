@@ -7,10 +7,12 @@ namespace RagSystem.Ingestion.Sql;
 public class SchemaIntrospector
 {
     private readonly string _connectionString;
+    private readonly ISchemaDescriptionProvider _schemaDescriptionProvider;
 
-    public SchemaIntrospector(string connectionString)
+    public SchemaIntrospector(string connectionString, ISchemaDescriptionProvider schemaDescriptionProvider)
     {
         _connectionString = connectionString;
+        _schemaDescriptionProvider = schemaDescriptionProvider;
     }
 
     public async Task<List<TableSchema>> GetSchemaAsync(IEnumerable<string> allowedTables)
@@ -45,6 +47,6 @@ public class SchemaIntrospector
             })
             .ToList();
 
-        return tables;
+        return _schemaDescriptionProvider.Enrich(tables);
     }
 }
